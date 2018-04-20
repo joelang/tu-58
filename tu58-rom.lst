@@ -1,0 +1,1396 @@
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;DEC TU-58 firmware disassembly
+                        ;ROM version:  23-389E2-00
+                        ;disssembly version: 0.2
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;
+                        ; External RAM References:
+
+                        FL_XOFF           EQU  2000h  ;xoff flag
+                        ;
+                        ;Serial data from host is managed by a state machine.
+                        ;The RDF (rst6.5) interrupt reads the UART and then
+                        ;jumps to the address in cur_state. The handlers change
+                        ;cur_state to implement the protocol.
+                        CUR_STATE         EQU  2001h  ;current state
+                        ;
+                        BYT_DON           EQU  2003h  ;transfered count
+                        CHK_SAV           EQU  2005h  ;checksum save
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;command/response packet storage
+                        ;some addresses are duplicated
+                        ;since command and response use
+                        ;some fields differently
+                        PK_FLAG           EQU  2007h  ;flag
+                        PK_CMDCT          EQU  2008h  ;count
+                        PK_OPCD           EQU  2009h  ;op code
+                        PK_MOD            EQU  200Ah  ;modifier
+                        PK_SUCC           EQU  200Ah  ;success code
+                        PK_UNIT           EQU  200Bh  ;unit
+                        PK_SWIT           EQU  200Ch  ;switches
+                        PK_SEQL           EQU  200Dh  ;sequence low (unused)
+                        PK_SEQH           EQU  200Eh  ;sequence hi (unused)
+                        PK_CNTL           EQU  200Fh  ;data count low
+                        PK_CNTH           EQU  2010h  ;data count hi
+                        PK_BLKL           EQU  2011h  ;block number low
+                        PK_SUMSL          EQU  2011h  ;summary status low
+                        PK_BLKH           EQU  2012h  ;block number hi
+                        PK_SUMSH          EQU  2012h  ;summary status hi
+                        PK_CHK            EQU  2013h  ;packet check sum
+                        ;
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;data buffer (multiuse)
+                        ;tape write starts with w_gap1 and
+                        ;uses a larger buffer to allow for 
+                        ;leading bits for AGC and SYNC
+                        ;tape read data goes into buffer
+                        ;send data to host starts with bf_type
+                        ;the type, count and checksum are filled in
+                        ;and the block sent without copy 
+                        W_GAP1            EQU  2013h  ;zero filled gap
+                        W_GAP2            EQU  2015h  ;zero filled gap
+                        W_SYNC            EQU  2017h  ;sync word
+                        BF_TYPE           EQU  2017h  ;packet type
+                        BF_CNT            EQU  2018h  ;packet byte count
+                        BUFFER            EQU  2019h  ;tape read/write buffer
+                        W_BEND            EQU  2098h  ;end of data buffer
+                        BF_CHKL           EQU  2099h  ;buffer check sum low
+                        BF_CHKH           EQU  209Ah  ;buffer check sum hi
+                        ;
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ;tape mark buffer
+                        ;the tape mark is the block number
+                        ;followed by the inverted block number
+                        ID_HDR1           EQU  209Bh
+                        ID_HDR2           EQU  209Dh
+                        ID_HDR3           EQU  209Eh
+                        ;
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        CHKLO             EQU  209Fh  ;checksum low
+                        CHKHI             EQU  20A0h  ;checksum hi
+                        FL_GO             EQU  20A2h  ;flag GO
+                        DR0_POS           EQU  20A3h  ;drive 0 cur position
+                        DR1_POS           EQU  20A5h  ;drive 1 cur pos
+                        TRG_BLL           EQU  20A7h  ;target block low
+                        TRG_BLH           EQU  20A8h  ;target block hi
+                        CUR_BLK           EQU  20A9h  ;current tape block
+                        BTYCNT            EQU  20ABh  ;byte count (to go)
+                        CASS_IN           EQU  20ADh  ;cassette in place
+                        PB_IMG            EQU  20AEh  ;port b image
+                        RTRY_CT           EQU  20AFh  ;retry count
+                        SEEK_RT           EQU  20B0h  ;seek retry counter
+                        SW_BITS           EQU  20B3h  ;drive select bit save
+                        SUCCES            EQU  20B4h  ;success code
+                        SUMST             EQU  20B5h  ;summary status
+                        FL_BOOT           EQU  20B6h  ;init flag
+                        STACK             EQU  20FFh  ;stack pointer
+
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                        ; IO Port Map:
+
+                        UART              EQU  08h
+                        ;8155 registers
+                        CSR               EQU  20h
+                        PortA             EQU  21h
+                        PortB             EQU  22h
+                        PortC             EQU  23h
+                        TIMERL            EQU  24h
+                        TIMERH            EQU  25h
+
+                        ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+                                          ORG  0
+
+0000  31 FF 20          RESET:            LXI  SP, STACK          ; 
+0003  DB 21                               IN   PortA              ; 
+0005  E6 40                               ANI  40h                ;boot sw active?
+0007  CA 03 01                            JZ   BOOT_GO            ;then boot 
+000A  CD 45 00                            CALL CLR_SW             ;reset everything
+000D  CD 9A 07                            CALL SLF_TEST           ;do self test 
+
+0010  F3                RST2:             DI                      ; 
+0011  31 FF 20                            LXI  SP, STACK          ;reset stack 
+0014  CD 49 00                            CALL SOFT_RST           ;reset protocol
+                        ;
+                        ;send INIT till RDF interrupt 
+0017  3E 04             SND_INIT:         MVI  A, 04h             ;send INIT character 
+0019  CD 31 02                            CALL OUTCH              ; 
+001C  CD F0 00                            CALL CHK_BOOT           ;check for boot 
+001F  C3 17 00                            JMP  SND_INIT           ;endless loop 
+
+0022  00                                  DB   00h                ;filler
+0023  00                                  DB   00h                ;
+                        ;
+                        ;TRAP on UART frame error
+0024  F3                RST_FRAME_ERR:    DI                      ; 
+0025  31 FF 20                            LXI  SP, STACK          ;reset stack 
+0028  DB 08                               IN   UART               ;get character 
+002A  3E FD                               MVI  A, 0FDh            ;all stop 
+002C  D3 22                               OUT  PortB              ;stop everything 
+002E  2E 05                               MVI  L, 05h             ;loop count 
+0030  C3 77 00                            JMP  INIT_LOOP          ; 
+
+0033  00                                  DB   00h                ;filler
+                        ;
+                        ;RST6.5 RDF
+0034  F5                RST_UART_RX:      PUSH PSW                ; 
+0035  E5                                  PUSH H                  ; 
+0036  DB 08                               IN   UART               ;get UART character 
+0038  2A 01 20                            LHLD CUR_STATE          ;get state pointer 
+003B  E9                                  PCHL                    ;jump to it 
+                        ;
+                        ;RST7.5 tape clock edge so shift tape bit in
+                        ;bits are accumulated in B
+003C  3E 10             RST_RD_STROBE:    MVI  A, 10h             ;reset int 7
+003E  30                                  SIM                     ;  
+003F  20                                  RIM                     ; 
+0040  07                                  RLC                     ;SID into carry 
+0041  78                                  MOV  A, B               ;save old bits 
+0042  1F                                  RAR                     ;shift in input 
+0043  47                                  MOV  B, A               ;return bit in B 
+0044  C9                                  RET                     ; 
+                        ;
+                        ;reset switches, XOFF and state
+                        ;initialize 8155 registers
+0045  AF                CLR_SW:           XRA  A                  ; 
+0046  32 0C 20                            STA  PK_SWIT            ;clear switches 
+
+0049  AF                SOFT_RST:         XRA  A                  ;clear XOFF flag 
+004A  32 00 20                            STA  FL_XOFF            ; 
+
+004D  21 74 01          CLR_STATE:        LXI  H, STATE_IDLE      ;reset state machine 
+                        ;
+                        ;setup 8155 registers
+0050  22 01 20          SETREGS:          SHLD CUR_STATE          ;set next state 
+0053  3E 4D                               MVI  A, 4Dh             ;en SDE, mask off 5,7 
+0055  30                                  SIM                     ; 
+0056  FB                                  EI                      ; 
+0057  3E FE             SETRG1:           MVI  A, 0FEh            ; 
+0059  D3 20                               OUT  CSR                ; 
+005B  3E FD                               MVI  A, 0FDh            ; 
+005D  D3 22                               OUT  PortB              ; 
+005F  DB 23                               IN   PortC              ; 
+0061  F6 01                               ORI  01h                ; 
+0063  D3 23                               OUT  PortC              ; 
+0065  3E 0C                               MVI  A, 0Ch             ; 
+0067  32 AD 20                            STA  CASS_IN            ;set no cass
+006A  AF                                  XRA  A                  ; 
+006B  32 A2 20                            STA  FL_GO              ;reset go flag 
+006E  3A 0C 20                            LDA  PK_SWIT            ; 
+0071  E6 08                               ANI  08h                ;leave flow set 
+0073  32 0C 20                            STA  PK_SWIT            ; 
+0076  C9                                  RET                     ; 
+                        ;
+                        ;get here on rx framing error,irq disabled
+                        ;loop waiting for INIT from host
+                        ;on entry L is the max characters while 
+                        ;looking for INIT
+0077  CD F0 00          INIT_LOOP:        CALL CHK_BOOT           ;check boot swtch 
+007A  20                                  RIM                     ;get serial status 
+007B  E6 20                               ANI  20h                ;mask to RDA 
+007D  CA 77 00                            JZ   INIT_LOOP          ;loop till data ready 
+0080  2D                                  DCR  L                  ;dec timeout 
+0081  CA 10 00                            JZ   RST2               ;start over? 
+0084  DB 08                               IN   UART               ;read UART 
+0086  FE 04                               CPI  04h                ;INIT 
+0088  C2 77 00                            JNZ  INIT_LOOP          ;loop if not 
+008B  CD 49 00                            CALL SOFT_RST           ;reset protocol 
+008E  32 B6 20                            STA  FL_BOOT            ;clear maybe 
+                        ;
+                        ;commands return here when done
+0091  31 FF 20          IDLE_LOOP:        LXI  SP, STACK          ;reset stack 
+0094  AF                                  XRA  A                  ; 
+0095  32 0C 20                            STA  PK_SWIT            ;clear switch 
+0098  32 A2 20                            STA  FL_GO              ;clear go 
+009B  21 00 00                            LXI  H, 0000h           ;clear status 
+009E  22 B4 20                            SHLD SUCCES             ;clear error bits 
+00A1  22 03 20                            SHLD BYT_DON            ;clear bytes sent 
+                        ;enable serial interrupts
+00A4  3E 4D                               MVI  A, 4Dh             ;en SDE mask 5,7 
+00A6  30                                  SIM                     ; 
+00A7  FB                                  EI                      ; 
+                        ;
+                        ;Command loop
+                        ;loop till FL_GO sets then dispatch
+                        ;to the opcode routine
+00A8  CD 18 03          CMD_LOOP:         CALL DRV_RDY            ;CART in place? 
+00AB  CD F0 00                            CALL CHK_BOOT           ;check for boot req
+00AE  3A A2 20                            LDA  FL_GO              ;command received? 
+00B1  E6 80                               ANI  80h                ; 
+00B3  CA A8 00                            JZ   CMD_LOOP           ;loop if nothing to do
+                        ;got packet so check type 
+00B6  3A 07 20                            LDA  PK_FLAG            ;get flag 
+00B9  FE 02                               CPI  02h                ;is eq COMMAND?
+00BB  C2 10 00                            JNZ  RST2               ;error?
+                        ;check for opcode in range 
+00BE  3A 09 20                            LDA  PK_OPCD            ;get opcode 
+00C1  FE 0B                               CPI  0Bh                ;>max command? 
+00C3  3E D0                               MVI  A, 0D0h            ;bad op code 
+00C5  D2 75 07                            JNC  SET_SUCC           ;error exit
+                        ;make pointer to routine 
+00C8  3A 09 20                            LDA  PK_OPCD            ;get opcode 
+00CB  21 D8 00                            LXI  H, JMPTBL          ;point to command table 
+00CE  07                                  RLC                     ;mult X 2 
+00CF  5F                                  MOV  E, A               ;index into table 
+00D0  16 00                               MVI  D, 00h             ; 
+00D2  19                                  DAD  D                  ; 
+00D3  5E                                  MOV  E, M               ; 
+00D4  23                                  INX  H                  ; 
+00D5  56                                  MOV  D, M               ; 
+00D6  EB                                  XCHG                    ; 
+00D7  E9                                  PCHL                    ;jump to command 
+                        ;
+                        ;function address table
+00D8  46                JMPTBL:           DW   OP_NOOP            ;  
+00DA  80                                  DW   OP_INIT            ;  
+00DC  1D                                  DW   OP_READ            ;  
+00DE  C7                                  DW   OP_WRITE           ;  
+00E0  46                                  DW   OP_NOOP            ;  
+00E2  95                                  DW   OP_POS             ;  
+00E4  46                                  DW   OP_NOOP            ;  
+00E6  EC                                  DW   OP_DIAG            ;  
+00E8  86                                  DW   OP_GETST           ;  
+00EA  46                                  DW   OP_NOOP            ;  
+00EC  46                                  DW   OP_NOOP            ;  
+00EE  46                                  DW   OP_NOOP            ;  
+                        ;
+                        ;check for BOOT request
+                        ;debounce the switch a bit
+00F0  DB 21             CHK_BOOT:         IN   PortA              ;read flags
+00F2  E6 40                               ANI  40h                ;mask to boot switch 
+00F4  3A B6 20                            LDA  FL_BOOT            ;get debounce flag 
+00F7  CA 00 01                            JZ   DB_BOOT            ;is switch set
+00FA  F6 01                               ORI  01h                ;set flag for next pass 
+00FC  32 B6 20                            STA  FL_BOOT            ;set init flag 
+00FF  C9                                  RET                     ; 
+                        ;debounce BOOT switch
+0100  E6 01             DB_BOOT:          ANI  01h                ;need BOOT twice 
+0102  C8                                  RZ                      ;ret if first 
+                        ;
+                        ;boot Switch is really active
+0103  31 FF 20          BOOT_GO:          LXI  SP, STACK          ; 
+0106  21 C3 01                            LXI  H, RETRN1          ;disable RX data 
+0109  CD 50 00                            CALL SETREGS            ;set 8155 regs
+010C  AF                                  XRA  A                  ; 
+010D  32 0C 20                            STA  PK_SWIT            ;clear option switch
+0110  D3 23                               OUT  PortC              ;clear port C 
+0112  06 FF                               MVI  B, 0FFh            ;delay count 
+0114  CD 04 04                            CALL LNG_DLY            ;delay 350ms.
+0117  CD 9A 07                            CALL SLF_TEST           ;run self test
+                        ;
+                        ;boot state handler
+                        ;get here via boot switch
+                        ;or serial boot command
+                        ;state_boot acts different 
+                        ;depending on how it was invoked
+011A  32 0B 20          STATE_BOOT:       STA  PK_UNIT            ;set unit
+011D  32 00 20                            STA  FL_XOFF            ;clr XOFF  
+0120  21 00 00                            LXI  H, 0000h           ;set block num to 0 
+0123  22 A9 20                            SHLD CUR_BLK            ; 
+
+0126  CD 52 05          ST_BOO1:          CALL TAP_READ           ;read tape block 
+0129  CD 0E 04                            CALL TAP_STP            ;stop tape 
+012C  21 19 20                            LXI  H, BUFFER          ;buffer 
+012F  0E 80                               MVI  C, 80h             ;count
+                        ; 
+                        ;send character/byte to host
+0131  7E                BNXTCH:           MOV  A, M               ;get (next) byte 
+0132  CD 31 02                            CALL OUTCH              ;send byte 
+                        ;
+                        ;see how we got here 
+                        ;check cur_state lo byte for 1ah
+0135  3A 01 20                            LDA  CUR_STATE          ; 
+0138  FE 1A                               CPI  1Ah                ;serial boot? 
+013A  CA 51 01                            JZ   ST_BOO3            ; 
+                        ;hardware boot switch
+013D  7E                                  MOV  A, M               ;get character 
+013E  FE 47                               CPI  47h                ;eq 'G'? 
+0140  CA 6B 01                            JZ   SBOOTE             ;then done 
+0143  06 02                               MVI  B, 02h             ; 
+0145  E6 F8                               ANI  0F8h               ; 
+0147  EE 30                               XRI  30h                ; 
+0149  CA 4E 01                            JZ   ST_BOO2            ; 
+014C  06 14                               MVI  B, 14h             ;delay count 
+014E  CD 04 04          ST_BOO2:          CALL LNG_DLY            ;delay 28ms.
+                        ;
+0151  23                ST_BOO3:          INX  H                  ;inc buffer pointer 
+0152  0D                                  DCR  C                  ;dec byte count  
+0153  C2 31 01                            JNZ  BNXTCH             ;loop till done 
+0156  2A A9 20                            LHLD CUR_BLK            ; 
+0159  23                                  INX  H                  ;inc block number 
+015A  22 A9 20                            SHLD CUR_BLK            ; 
+015D  3E 04                               MVI  A, 04h             ;read 4 blocks 
+015F  BD                                  CMP  L                  ; 
+0160  C2 26 01                            JNZ  ST_BOO1            ;loop if more 
+                        ;
+                        ;see how we got here 
+                        ;check cur_state lo byte for 1ah
+0163  3A 01 20                            LDA  CUR_STATE          ; 
+0166  FE 1A                               CPI  1Ah                ; 
+0168  C2 26 01                            JNZ  ST_BOO1            ;if BOOTSW loop
+                        ;serial boot end
+016B  CD 49 00          SBOOTE:           CALL SOFT_RST           ;reset protocol 
+016E  32 B6 20                            STA  FL_BOOT            ; 
+0171  C3 91 00                            JMP  IDLE_LOOP          ;goto idle 
+                        ;
+                        ;idle state handler
+                        ;get here with new character in A
+                        ;and nothing in progress
+0174  FE 08             STATE_IDLE:       CPI  08h                ;eq BOOT? 
+0176  21 1A 01                            LXI  H, STATE_BOOT      ;set next state
+0179  CA C0 01                            JZ   RETRN              ; 
+017C  FE 13                               CPI  13h                ;eq XOFF? 
+017E  C2 89 01                            JNZ  ST_IDL1            ; 
+0181  3E FF                               MVI  A, 0FFh            ; 
+0183  32 00 20                            STA  FL_XOFF            ;set XOFF flag 
+0186  C3 C3 01                            JMP  RETRN1             ;no state change 
+
+0189  6F                ST_IDL1:          MOV  L, A               ; 
+018A  E6 FE                               ANI  0FEh               ; 
+018C  FE 10                               CPI  10h                ;eq CONTIN? 
+018E  C2 98 01                            JNZ  ST_IDL2            ; 
+0191  AF                                  XRA  A                  ; 
+0192  32 00 20                            STA  FL_XOFF            ;clear XOFF 
+0195  C3 C3 01                            JMP  RETRN1             ;no state change 
+
+0198  3E 04             ST_IDL2:          MVI  A, 04h             ;
+019A  BD                                  CMP  L                  ;eq INIT? 
+019B  CA 58 02                            JZ   GOT_INIT           ;
+                        ;
+                        ;data or command pkt 
+019E  3A A2 20                            LDA  FL_GO              ; 
+01A1  E6 80                               ANI  80h                ; 
+01A3  C2 10 00                            JNZ  RST2               ;error if go is set 
+01A6  7D                                  MOV  A, L               ; 
+01A7  32 07 20                            STA  PK_FLAG            ;save pkt flag 
+01AA  32 9F 20                            STA  CHKLO              ;add to chksum 
+01AD  11 19 20                            LXI  D, BUFFER          ;point to DATA buf 
+01B0  FE 01                               CPI  01h                ;eq DATA? 
+01B2  CA BD 01                            JZ   ST_IDL3            ; 
+01B5  11 09 20                            LXI  D, PK_OPCD         ;point to CMD buf 
+01B8  FE 02                               CPI  02h                ;eq CMD? 
+01BA  C2 10 00                            JNZ  RST2               ;no is error 
+01BD  21 C7 01          ST_IDL3:          LXI  H, STATE_CNT       ;
+                        ; 
+                        ;return saving next state
+01C0  22 01 20          RETRN:            SHLD CUR_STATE          ;save next state
+                        ;
+                        ;return, no state change
+01C3  E1                RETRN1:           POP  H                  ;return 
+01C4  F1                                  POP  PSW                ; 
+01C5  FB                                  EI                      ; 
+01C6  C9                                  RET                     ; 
+                        ;
+                        ;count state handler
+01C7  4F                STATE_CNT:        MOV  C, A               ;save count 
+01C8  32 08 20                            STA  PK_CMDCT           ; 
+01CB  32 A0 20                            STA  CHKHI              ;add to chksum 
+01CE  FE 81                               CPI  81h                ;count too big? 
+01D0  D2 10 00                            JNC  RST2               ; 
+01D3  06 01                               MVI  B, 01h             ;preset B for add_chk
+01D5  21 DB 01                            LXI  H, STATE_DATI      ;set next state 
+01D8  C3 C0 01                            JMP  RETRN              ; 
+                        ;
+                        ;data/cmd state handler
+01DB  12                STATE_DATI:       STAX D                  ;save byte 
+01DC  1A                                  LDAX D                  ; 
+01DD  CD 13 02                            CALL ADD_CHK            ;add to checksum 
+01E0  0D                                  DCR  C                  ;dec count 
+01E1  CA E8 01                            JZ   ST_DAT1            ;done? 
+01E4  13                                  INX  D                  ;inc pointer 
+01E5  C3 C3 01                            JMP  RETRN1             ;return (same state) 
+
+01E8  21 EE 01          ST_DAT1:          LXI  H, STATE_CK1       ;set next state 
+01EB  C3 C0 01                            JMP  RETRN              ;
+                        ;
+                        ;checksum1 state handler (1st.  char) 
+01EE  21 9F 20          STATE_CK1:        LXI  H, CHKLO           ;get calc cksum 
+01F1  96                                  SUB  M                  ;equal? 
+01F2  C2 10 00                            JNZ  RST2               ;chksum error? 
+01F5  21 FB 01                            LXI  H, STATE_CK2       ;set next state
+01F8  C3 C0 01                            JMP  RETRN              ; 
+                        ;
+                        ;checksum2 state handler (2nd. char)
+01FB  21 A0 20          STATE_CK2:        LXI  H, CHKHI           ;get calc cksum 
+01FE  96                                  SUB  M                  ;equal? 
+01FF  C2 10 00                            JNZ  RST2               ;chksum error? 
+0202  2A 9F 20                            LHLD CHKLO              ; 
+0205  22 05 20                            SHLD CHK_SAV            ;save it 
+0208  3E 80                               MVI  A, 80h             ; 
+020A  32 A2 20                            STA  FL_GO              ;set go flag 
+020D  21 74 01                            LXI  H, STATE_IDLE      ;return to idle 
+0210  C3 C0 01                            JMP  RETRN              ; 
+                        ;
+                        ;add A to check sum
+                        ;B is the low/hi byte counter
+                        ;must be preserved between calls
+0213  E5                ADD_CHK:          PUSH H                  ;save HL 
+0214  6F                                  MOV  L, A               ; 
+0215  78                                  MOV  A, B               ;get low/hi 
+0216  EE 01                               XRI  01h                ;flip low/hi 
+0218  47                                  MOV  B, A               ;save low/hi
+0219  C2 24 02                            JNZ  ADDCK2             ;jmp if hi 
+                        ;add lo byte
+021C  7D                ADDCK1:           MOV  A, L               ;get byte 
+021D  21 9F 20                            LXI  H, CHKLO           ;point to chk low  
+0220  8E                                  ADC  M                  ;  
+0221  77                                  MOV  M, A               ;put back
+0222  2E 00                               MVI  L, 00h             ;add this to hi byte 
+                        ;add high byte
+0224  7D                ADDCK2:           MOV  A, L               ;get byte 
+0225  21 A0 20                            LXI  H, CHKHI           ;point to chk hi 
+0228  8E                                  ADC  M                  ; 
+0229  77                                  MOV  M, A               ;put back 
+022A  2E 00                               MVI  L, 00h             ; 
+022C  DA 1C 02                            JC   ADDCK1             ;add carry to lo byte 
+022F  E1                                  POP  H                  ;restore HL 
+0230  C9                                  RET                     ; 
+                        ;
+                        ;send character to host
+                        ;int 5.5 polled for output status
+                        ;stop tape if this takes too long
+0231  F5                OUTCH:            PUSH PSW                ; 
+0232  E5                                  PUSH H                  ; 
+0233  2E 08                               MVI  L, 08h             ;tape timeout counter 
+
+0235  2D                OUTCH1:           DCR  L                  ;dec timeout 
+0236  C5                                  PUSH B                  ; 
+0237  CC 0E 04                            CZ   TAP_STP            ;if 0 stop tape 
+023A  C1                                  POP  B                  ; 
+023B  20                                  RIM                     ;get int status 
+023C  E6 10                               ANI  10h                ;mask to TDRE 
+023E  CA 35 02                            JZ   OUTCH1             ;loop if full 
+0241  3A 00 20                            LDA  FL_XOFF            ;XOFF set? 
+0244  3C                                  INR  A                  ; 
+0245  CA 35 02                            JZ   OUTCH1             ;loop if cant send 
+0248  E1                                  POP  H                  ; 
+0249  F1                                  POP  PSW                ; 
+024A  D3 08                               OUT  UART               ;send character 
+                        ;switch bit 08H is not documented
+                        ;it sets FL_XOFF for each character sent
+024C  3A 0C 20                            LDA  PK_SWIT            ; 
+024F  E6 08                               ANI  08h                ; 
+0251  C8                                  RZ                      ;ret if not set
+0252  3E FF                               MVI  A, 0FFh            ; 
+0254  32 00 20                            STA  FL_XOFF            ;set XOFF 
+0257  C9                                  RET                     ; 
+                        ;
+                        ;got INIT character
+0258  31 FF 20          GOT_INIT:         LXI  SP, STACK          ;reset stack 
+025B  CD 49 00                            CALL SOFT_RST           ;reset protocol 
+025E  CD 4C 05                            CALL SND_CONT           ;send continue 
+0261  C3 91 00                            JMP  IDLE_LOOP          ;goto idle 
+                        ;
+                        ;generate check sum and send data packet
+0264  21 17 20          SND_DATA:         LXI  H, BF_TYPE         ;point to type 
+0267  36 01                               MVI  M, 01h             ;set type=data 
+0269  23                                  INX  H                  ;point to count 
+                        ;
+                        ;generate check sum and send data/response to host
+                        ;HL points to packet byte count
+026A  56                SND_RESP:         MOV  D, M               ;get packet byte count 
+026B  14                                  INR  D                  ;fix count for cksum 
+026C  14                                  INR  D                  ; 
+026D  AF                                  XRA  A                  ;clear checksum 
+026E  32 9F 20                            STA  CHKLO              ; 
+0271  32 A0 20                            STA  CHKHI              ; 
+0274  06 01                               MVI  B, 01h             ;preset B hi/low add_chk 
+0276  2B                                  DCX  H                  ;point to pkt start
+                        ;
+0277  7E                SND_RES1:         MOV  A, M               ;get byte
+0278  CD 13 02                            CALL ADD_CHK            ;add to check
+027B  7E                                  MOV  A, M               ;get same byte 
+027C  CD 31 02                            CALL OUTCH              ;send byte 
+027F  23                                  INX  H                  ;inc pointer 
+0280  15                                  DCR  D                  ;dec count 
+0281  C2 77 02                            JNZ  SND_RES1           ;loop 
+0284  21 9F 20                            LXI  H, CHKLO           ;point to checksum lo 
+0287  CD 8B 02                            CALL SND_CKSUM          ;send it 
+028A  23                                  INX  H                  ;point to checksum hi 
+                        ;
+                        ;send check sum
+028B  3E 1E             SND_CKSUM:        MVI  A, 1Eh             ;delay count
+028D  CD FB 03                            CALL DELAY              ;delay 500us.
+0290  7E                                  MOV  A, M               ;get chksum 
+0291  CD 31 02                            CALL OUTCH              ;send it 
+0294  C9                                  RET                     ; 
+                        ;
+                        ;command: position tape
+0295  CD FA 06          OP_POS:           CALL SET_BLK            ;setup block+count 
+0298  CD A4 02                            CALL SEL_DRV            ;select drive 
+029B  CD 24 03                            CALL SEEK               ;find block 
+029E  CD 0E 04                            CALL TAP_STP            ;tape stop 
+02A1  C3 46 07                            JMP  OP_NOOP            ;send response 
+                        ;
+                        ;select drive and track
+02A4  2A A9 20          SEL_DRV:          LHLD CUR_BLK            ;save current block
+02A7  EB                                  XCHG                    ; 
+02A8  21 AE 20                            LXI  H, PB_IMG          ;point to B image
+                        ;select track 0 
+02AB  36 E9                               MVI  M, 0E9h            ;trk0 fwd read stop 
+02AD  7A                                  MOV  A, D               ;block num hi byte 
+02AE  FE 08                               CPI  08h                ;block too large? 
+02B0  3E FE                               MVI  A, 0FEh            ;partial operation
+02B2  D2 75 07                            JNC  SET_SUCC           ;exit if error 
+02B5  7A                                  MOV  A, D               ;blknum hi  
+02B6  FE 04                               CPI  04h                ;blk >=400? 
+02B8  3F                                  CMC                     ; 
+02B9  7B                                  MOV  A, E               ;blknum lo 
+02BA  17                                  RAL                     ; 
+02BB  5F                                  MOV  E, A               ;save 
+02BC  7A                                  MOV  A, D               ;blknum hi 
+02BD  17                                  RAL                     ; 
+02BE  E6 07                               ANI  07h                ;mask block number 
+02C0  57                                  MOV  D, A               ; 
+02C1  FE 04                               CPI  04h                ;bit3 set=track 1 
+02C3  DA C8 02                            JC   SEL_UX             ;select unit 
+                        ;select track 1
+02C6  36 F9                               MVI  M, 0F9h            ;trk1 fwd read stop 
+                        ;select unit
+02C8  3A 0B 20          SEL_UX:           LDA  PK_UNIT            ;get unit 
+02CB  FE 01                               CPI  01h                ; 
+02CD  CA D8 02                            JZ   SEL_U1             ;eq unit 1? 
+02D0  DA E4 02                            JC   SEL_U0             ;eq unit 0? 
+02D3  3E F8                               MVI  A, 0F8h            ;bad unit 
+02D5  C3 75 07                            JMP  SET_SUCC           ;error exit
+                        ;select unit 1 (B)
+02D8  7E                SEL_U1:           MOV  A, M               ;get port B image 
+02D9  E6 F7                               ANI  0F7h               ;sel B low 
+02DB  77                                  MOV  M, A               ; 
+02DC  3E 04                               MVI  A, 04h             ;b cart switch 
+02DE  2A A5 20                            LHLD DR1_POS            ; 
+02E1  C3 E9 02                            JMP  SEL_COM            ; 
+                        ;select unit 0 (A)
+02E4  3E 08             SEL_U0:           MVI  A, 08h             ;a cart switch 
+02E6  2A A3 20                            LHLD DR0_POS            ; 
+
+02E9  32 B3 20          SEL_COM:          STA  SW_BITS            ;save cart sw bits 
+02EC  4F                                  MOV  C, A               ; 
+02ED  3A AD 20                            LDA  CASS_IN            ; 
+02F0  A1                                  ANA  C                  ; 
+02F1  CA F6 02                            JZ   SEL_C1             ; 
+02F4  6B                                  MOV  L, E               ;mov blknum to HL 
+02F5  62                                  MOV  H, D               ; 
+
+02F6  CD FE 02          SEL_C1:           CALL CHK_SEL            ; 
+02F9  EB                                  XCHG                    ; 
+02FA  22 A7 20                            SHLD TRG_BLL            ;set target block 
+02FD  C9                                  RET                     ; 
+                        ;
+                        ;check selected drive for cart
+02FE  CD 18 03          CHK_SEL:          CALL DRV_RDY            ;CART in place
+0301  E5                                  PUSH H                  ; 
+0302  21 B3 20                            LXI  H, SW_BITS         ;drive sel bits 
+0305  DB 21                               IN   PortA              ; 
+0307  A6                                  ANA  M                  ;and switches 
+0308  3E F7                               MVI  A, 0F7h            ;no cart 
+030A  C2 75 07                            JNZ  SET_SUCC           ;error exit 
+                        ;cassette in place
+030D  3A AD 20                            LDA  CASS_IN            ; 
+0310  2F                                  CMA                     ; 
+0311  B6                                  ORA  M                  ; 
+0312  2F                                  CMA                     ; 
+0313  32 AD 20                            STA  CASS_IN            ; 
+0316  E1                                  POP  H                  ; 
+0317  C9                                  RET                     ; 
+                        ;
+                        ;or cass in bits to status reg
+0318  E5                DRV_RDY:          PUSH H                  ; 
+0319  DB 21                               IN   PortA              ;get cart sw 
+031B  E6 0C                               ANI  0Ch                ;mask bits 
+031D  21 AD 20                            LXI  H, CASS_IN         ;point to status reg 
+0320  B6                                  ORA  M                  ;or bits 
+0321  77                                  MOV  M, A               ;write back 
+0322  E1                                  POP  H                  ; 
+0323  C9                                  RET                     ; 
+                        ;
+                        ;seek to block
+                        ;returns with tape running forward
+                        ;in gap between header and data
+0324  3E F8             SEEK:             MVI  A, 0F8h            ;set retry count 
+0326  32 B0 20                            STA  SEEK_RT            ; 
+
+0329  CD FE 02          SEEKNX:           CALL CHK_SEL            ; 
+032C  2A A7 20                            LHLD TRG_BLL            ;get target block 
+032F  7C                                  MOV  A, H               ;get hi byte 
+0330  E6 03                               ANI  03h                ;mask to 3ffh 
+0332  67                                  MOV  H, A               ;put back 
+0333  7A                                  MOV  A, D               ;get hi byte 
+0334  E6 03                               ANI  03h                ;mask to 3ffh 
+0336  57                                  MOV  D, A               ;put back 
+0337  7D                                  MOV  A, L               ;get target lo
+0338  93                                  SUB  E                  ;sub current lo
+0339  6F                                  MOV  L, A               ; 
+033A  7C                                  MOV  A, H               ;get target hi 
+033B  9A                                  SBB  D                  ;subtract
+033C  67                                  MOV  H, A               ; 
+033D  D2 66 03                            JNC  SEEK02             ;jmp if no error 
+
+0340  3A B0 20          SEEK01:           LDA  SEEK_RT            ; 
+0343  3C                                  INR  A                  ;inc retry count 
+0344  32 B0 20                            STA  SEEK_RT            ; 
+0347  3E E0                               MVI  A, 0E0h            ;seek error 
+0349  CA 75 07                            JZ   SET_SUCC           ;if zero exit 
+                        ;
+                        ;retry seek
+034C  7D                                  MOV  A, L               ;blk lo 
+034D  2F                                  CMA                     ;negate 
+034E  6F                                  MOV  L, A               ; 
+034F  7C                                  MOV  A, H               ;blk hi 
+0350  2F                                  CMA                     ;negate 
+0351  67                                  MOV  H, A               ; 
+0352  23                                  INX  H                  ;add 3 
+0353  23                                  INX  H                  ; 
+0354  23                                  INX  H                  ; 
+0355  3A AE 20                            LDA  PB_IMG             ; 
+0358  F6 04                               ORI  04h                ;reverse
+035A  32 AE 20                            STA  PB_IMG             ; 
+035D  CD 3B 04                            CALL FAST_RUN           ;backup fast 
+0360  CD 0E 04                            CALL TAP_STP            ;stop tape 
+0363  C3 80 03                            JMP  TAP_RUN            ;run forward 
+
+0366  AF                SEEK02:           XRA  A                  ; 
+0367  BC                                  CMP  H                  ;hi byte not zero 
+0368  C2 75 03                            JNZ  SEEK03             ;room to rev fast 
+036B  BD                                  CMP  L                  ; 
+036C  CA 40 03                            JZ   SEEK01             ; 
+036F  3E 04                               MVI  A, 04h             ; 
+0371  BD                                  CMP  L                  ;small distance? 
+0372  D2 80 03                            JNC  TAP_RUN            ;then just run slow 
+
+0375  2B                SEEK03:           DCX  H                  ;dec desired block 
+0376  2B                                  DCX  H                  ; 
+0377  2B                                  DCX  H                  ; 
+0378  CD 3B 04                            CALL FAST_RUN           ;run reverse 
+037B  06 0F                               MVI  B, 0Fh             ;tach count  
+037D  CD 10 04                            CALL TAP_DCL            ;decellerate motor 
+                        ;
+                        ;set timer and run forward 30ips
+0380  3E BE             TAP_RUN:          MVI  A, 0BEh            ;setup timer
+0382  D3 24                               OUT  TIMERL             ;for 30 ips 
+0384  3E C0                               MVI  A, 0C0h            ; 
+0386  D3 25                               OUT  TIMERH             ; 
+0388  3E CE                               MVI  A, 0CEh            ; 
+038A  D3 20                               OUT  CSR                ;
+
+038C  3A AE 20                            LDA  PB_IMG             ;get port b bits 
+038F  F6 80                               ORI  80h                ;set 30IPS 
+0391  E6 FA                               ANI  0FAh               ;assert run forward
+0393  32 AE 20                            STA  PB_IMG             ;save image 
+0396  47                                  MOV  B, A               ; 
+0397  DB 22                               IN   PortB              ; 
+0399  E6 01                               ANI  01h                ;mask to run bit
+039B  78                                  MOV  A, B               ; 
+039C  D3 22                               OUT  PortB              ;set port bits 
+039E  06 1E                               MVI  B, 1Eh             ;delay count
+03A0  C4 04 04                            CNZ  LNG_DLY            ;delay 43ms.
+03A3  CD 74 04                            CALL FND_MRK            ;find next tape mark 
+03A6  FE 09                               CPI  09h                ;end of tape? 
+03A8  F2 08 05                            JP   AT_EOT             ;
+                         ;
+                         ;read ID block 
+03AB  CD A9 04                            CALL PLS_RUN            ;thump run one-shot
+03AE  0E 04                               MVI  C, 04h             ;count 
+03B0  21 9B 20                            LXI  H, ID_HDR1         ;buffer 
+03B3  CD D9 04                            CALL READBLK            ;read id block
+                         ;
+                         ;check for good ID read
+03B6  3A 9D 20                            LDA  ID_HDR2            ;get ID lo 
+03B9  21 9B 20                            LXI  H, ID_HDR1         ;point to ID header 
+03BC  2F                                  CMA                     ;complement bits 
+03BD  BE                                  CMP  M                  ;match? 
+03BE  C2 E1 03                            JNZ  ID_ERR             ; 
+03C1  3A 9E 20                            LDA  ID_HDR3            ;get ID hi 
+03C4  2F                                  CMA                     ;complement bits 
+03C5  23                                  INX  H                  ; 
+03C6  BE                                  CMP  M                  ;match? 
+03C7  C2 E1 03                            JNZ  ID_ERR             ; 
+                         ;
+                         ;good id read so set position
+03CA  CD 20 05                            CALL SET_POS            ;set cur pos 
+03CD  3A A7 20                            LDA  TRG_BLL            ;get target 
+03D0  BB                                  CMP  E                  ;we there? 
+03D1  C2 29 03                            JNZ  SEEKNX             ;jmp not there 
+03D4  3A A8 20                            LDA  TRG_BLH            ;get target 
+03D7  BA                                  CMP  D                  ;we there? 
+03D8  C2 29 03                            JNZ  SEEKNX             ;jmp not there 
+03DB  2E 08                               MVI  L, 08h             ;led 
+03DD  CD F2 03                            CALL TOG_PC             ;toggle it
+03E0  C9                                  RET                     ; 
+                        ;
+                        ;errror on id read
+03E1  2E 10             ID_ERR:           MVI  L, 10h             ;test point 2 
+03E3  CD F2 03                            CALL TOG_PC             ;toggle it
+03E6  21 B0 20                            LXI  H, SEEK_RT         ;retry counter 
+03E9  34                                  INR  M                  ; 
+03EA  C2 80 03                            JNZ  TAP_RUN            ;loop for retry 
+03ED  3E E0                               MVI  A, 0E0h            ;seek error
+03EF  C3 75 07                            JMP  SET_SUCC           ; 
+                        ;
+                        ;toggle bit port C
+                        ;A=bit to toggle
+03F2  DB 23             TOG_PC:           IN   PortC              ; 
+03F4  AD                                  XRA  L                  ; 
+03F5  D3 23                               OUT  PortC              ; 
+03F7  AD                                  XRA  L                  ; 
+03F8  D3 23                               OUT  PortC              ; 
+03FA  C9                                  RET                     ; 
+                        ;
+                        ;short delay A=count
+                        ;about 15us for each loop
+03FB  E6 FF             DELAY:            ANI  0FFh               ; 
+03FD  00                                  NOP                     ; 
+03FE  00                                  NOP                     ; 
+03FF  3D                                  DCR  A                  ; 
+0400  C2 FB 03                            JNZ  DELAY              ; 
+0403  C9                                  RET                     ; 
+                        ;
+                        ;long delay B=count
+                        ;about 1.5ms. each loop
+0404  3E 60             LNG_DLY:          MVI  A, 60h             ; 
+0406  CD FB 03                            CALL DELAY              ; 
+0409  05                                  DCR  B                  ; 
+040A  C2 04 04                            JNZ  LNG_DLY            ; 
+040D  C9                                  RET                     ; 
+                        ;
+                        ;stop tape
+040E  06 2B             TAP_STP:          MVI  B, 2Bh             ;tach cnt for stop 
+                        ;
+                        ;decellerate tape
+0410  DB 21             TAP_DCL:          IN   PortA              ; 
+0412  E6 10                               ANI  10h                ;run_tp 
+0414  C0                                  RNZ                     ;return if stopped
+                        ;run motor reverse to stop
+0415  3A AE 20                            LDA  PB_IMG             ;get old direction 
+0418  EE 05                               XRI  05h                ;flip run+rev bits 
+041A  D3 22                               OUT  PortB              ;change direction
+041C  EE 01                               XRI  01h                ;turn on run bit
+041E  D3 22                               OUT  PortB              ; 
+0420  E5                                  PUSH H                  ; 
+0421  67                                  MOV  H, A               ; 
+
+0422  48                TP_DCL1:          MOV  C, B               ;reset timeout count 
+0423  DB 21                               IN   PortA              ;read port
+0425  6F                                  MOV  L, A               ;save for compare 
+
+0426  DB 21             TP_DCL2:          IN   PortA              ;read port
+0428  AD                                  XRA  L                  ;compare to last 
+0429  E6 02                               ANI  02h                ;velocity (tach) bit?
+042B  C2 22 04                            JNZ  TP_DCL1            ;jmp if change
+                        ;no tach change
+042E  0D                                  DCR  C                  ;so dec timer 
+042F  C2 26 04                            JNZ  TP_DCL2            ;loop if no timeout 
+                        ;no tach change for B loops
+                        ;motor has slowed to desired speed
+0432  3A AE 20                            LDA  PB_IMG             ; 
+0435  F6 01                               ORI  01h                ;tape not run 
+0437  D3 22                               OUT  PortB              ; 
+0439  E1                                  POP  H                  ; 
+043A  C9                                  RET                     ; 
+                        ;
+                        ;run 60ips
+043B  3E 5F             FAST_RUN:         MVI  A, 5Fh             ;setup timer 
+043D  D3 24                               OUT  TIMERL             ;for 60 ips 
+043F  3E C0                               MVI  A, 0C0h            ; 
+0441  D3 25                               OUT  TIMERH             ; 
+0443  3E CE                               MVI  A, 0CEh            ; 
+0445  D3 20                               OUT  CSR                ;
+ 
+0447  3A AE 20                            LDA  PB_IMG             ; 
+044A  E6 7E                               ANI  7Eh                ;run reverse 60ips 
+044C  32 AE 20                            STA  PB_IMG             ; 
+044F  D3 22                               OUT  PortB              ;go 
+0451  06 2D                               MVI  B, 2Dh             ;delay count
+0453  CD 04 04                            CALL LNG_DLY            ;delay 65ms.
+                        ;
+                        ;loop finding tape marks and decrementing
+                        ;blocks to go in HL
+0456  CD 74 04          FST_RUN1:         CALL FND_MRK            ;find next mark 
+0459  FE 04                               CPI  04h                ; 
+045B  FA 14 05                            JM   GOT_BOT            ;bot 
+045E  FE 09                               CPI  09h                ; 
+0460  F2 07 05                            JP   GOT_EOT            ;eot 
+0463  CD A9 04                            CALL PLS_RUN            ;thump run one-shot 
+0466  CD FE 02                            CALL CHK_SEL            ; 
+0469  2B                                  DCX  H                  ;dec blocks to go 
+046A  AF                                  XRA  A                  ; 
+046B  BC                                  CMP  H                  ;eq zero? 
+046C  C2 56 04                            JNZ  FST_RUN1           ; 
+046F  BD                                  CMP  L                  ;eq zero? 
+0470  C2 56 04                            JNZ  FST_RUN1           ; 
+0473  C9                                  RET                     ; 
+                        ;
+                        ;find block mark
+                        ;returns count between clock edges
+0474  16 0C             FND_MRK:          MVI  D, 0Ch             ; 
+0476  1E 00                               MVI  E, 00h             ;clk time 
+0478  06 05                               MVI  B, 05h             ;wait for clk timeout
+                        ; 
+                        ;loop till mark or motor timeout
+047A  DB 21             FND_MK1:          IN   PortA              ; 
+047C  E6 90                               ANI  90h                ;mask mark+runl 
+047E  CA 7A 04                            JZ   FND_MK1            ;not mark+still running 
+0481  E6 10                               ANI  10h                ;mask runl
+                        ;
+0483  3E DF             ERR_STP:          MVI  A, 0DFh            ;motor stopped 
+0485  C2 75 07                            JNZ  SET_SUCC           ;error exit 
+                        ;
+                        ;tape mark found
+                        ;so time the read clock
+0488  CD C8 04          BLK_MARK:         CALL MRK_CLK            ;wait for clock 
+048B  DB 21                               IN   PortA              ;read port A 
+048D  E6 80                               ANI  80h                ;mask to mark bit 
+048F  C2 99 04                            JNZ  BLK_MK1            ;hi so time it 
+0492  05                                  DCR  B                  ; 
+0493  CA 74 04                            JZ   FND_MRK            ; 
+0496  C3 88 04                            JMP  BLK_MARK           ; 
+
+0499  20                BLK_MK1:          RIM                     ;read port 
+049A  E6 80                               ANI  80h                ;mask SID
+049C  CA A0 04                            JZ   BLK_MK2            ; 
+049F  1C                                  INR  E                  ;inc return value 
+
+04A0  15                BLK_MK2:          DCR  D                  ; 
+04A1  C2 88 04                            JNZ  BLK_MARK           ; 
+04A4  3E 1D                               MVI  A, 1Dh             ;rst 7 mask 5,7 
+04A6  30                                  SIM                     ; 
+04A7  7B                                  MOV  A, E               ; 
+04A8  C9                                  RET                     ; 
+                        ;
+                        ;pulse tape run line
+                        ;retrigger motor one-shot
+04A9  F5                PLS_RUN:          PUSH PSW                ; 
+04AA  3A AE 20                            LDA  PB_IMG             ;get port b bits 
+04AD  F6 01                               ORI  01h                ;negate tape run 
+04AF  D3 22                               OUT  PortB              ;set port 
+04B1  00                                  NOP                     ; 
+04B2  E6 FE                               ANI  0FEh               ;assert run 
+04B4  D3 22                               OUT  PortB              ;set port
+
+04B6  1E 03             PLS_RU1:          MVI  E, 03h             ; 
+
+04B8  CD C8 04          PLS_RU2:          CALL MRK_CLK            ; 
+04BB  DB 21                               IN   PortA              ; 
+04BD  E6 90                               ANI  90h                ;run_tp+mark 
+04BF  C2 B6 04                            JNZ  PLS_RU1            ; 
+04C2  1D                                  DCR  E                  ; 
+04C3  C2 B8 04                            JNZ  PLS_RU2            ; 
+04C6  F1                                  POP  PSW                ; 
+04C7  C9                                  RET                     ; 
+                        ;
+                        ;wait for clock in tape mark
+04C8  3E 1D             MRK_CLK:          MVI  A, 1Dh             ;rst 7 mask 5,7
+04CA  30                                  SIM                     ; 
+
+04CB  DB 21             MRK_CK1:          IN   PortA              ; 
+04CD  E6 10                               ANI  10h                ;run_tp 
+04CF  C2 83 04                            JNZ  ERR_STP            ;error stopped? 
+04D2  20                                  RIM                     ;read int status 
+04D3  E6 40                               ANI  40h                ;mask tape clock 
+04D5  CA CB 04                            JZ   MRK_CK1            ; 
+04D8  C9                                  RET                     ; 
+                        ;
+                        ;read block from tape
+                        ;tape is running positioned in gap 
+                        ;between header and data
+04D9  3E 1B             READBLK:          MVI  A, 1Bh             ;rst 7 mask 5,6
+04DB  30                                  SIM                     ; 
+                        ;
+                        ;Tape read loop syncronizes to data by waiting for
+                        ;rst7.5 interrupt generated by tape read clock.
+                        ;Data is shifted into the B reg via interupt.
+                        ;The housekeeping code is spread between the HLTs
+                        ;to fit the bit time window.
+04DC  FB                TAP_RD:           EI                      ;get bit 
+04DD  76                                  HLT                     ; 
+04DE  E6 80                               ANI  80h                ; 
+04E0  CA DC 04                            JZ   TAP_RD             ;wait for sync bit
+                        ;
+                        ;sync bit found now assemble bytes
+                        ;and write to buffer 
+04E3  FB                                  EI                      ;get bit
+04E4  76                                  HLT                     ; 
+04E5  FB                                  EI                      ; 
+04E6  76                                  HLT                     ; 
+04E7  FB                                  EI                      ; 
+04E8  76                                  HLT                     ; 
+
+04E9  FB                TAP_RD1:          EI                      ; 
+04EA  76                                  HLT                     ; 
+04EB  FB                                  EI                      ; 
+04EC  76                                  HLT                     ; 
+04ED  FB                                  EI                      ; 
+04EE  76                                  HLT                     ; 
+04EF  FB                                  EI                      ; 
+04F0  76                                  HLT                     ; 
+04F1  FB                                  EI                      ; 
+04F2  76                                  HLT                     ; 
+04F3  70                                  MOV  M, B               ;save byte
+04F4  FB                                  EI                      ;get bit 
+04F5  76                                  HLT                     ; 
+04F6  0D                                  DCR  C                  ;dec byte count 
+04F7  CA 02 05                            JZ   TAP_RD2            ;exit if done 
+04FA  FB                                  EI                      ;get bit 
+04FB  76                                  HLT                     ; 
+04FC  23                                  INX  H                  ;inc pointer 
+04FD  FB                                  EI                      ;get bit 
+04FE  76                                  HLT                     ; 
+04FF  C3 E9 04                            JMP  TAP_RD1            ;loop for 5 more bits
+
+0502  3E 0D             TAP_RD2:          MVI  A, 0Dh             ;mask 5,7
+0504  30                                  SIM                     ; 
+0505  FB                                  EI                      ; 
+0506  C9                                  RET                     ; 
+                        ;
+                        ;eot while running fast forward
+0507  F1                GOT_EOT:           POP  PSW               ;clean up stack 
+                        ;
+                        ;eot while seeking
+0508  21 FF 03          AT_EOT:           LXI  H, 03FFh           ;last block num
+050B  22 9B 20                            SHLD ID_HDR1            ; 
+050E  CD 20 05                            CALL SET_POS            ;make current 
+0511  C3 29 03                            JMP  SEEKNX             ;seek target
+                        ;
+                        ;bot while running fast reverse
+0514  F1                GOT_BOT:          POP  PSW                ;clean up stack 
+0515  06 28                               MVI  B, 28h             ;delay count 
+0517  CD 04 04                            CALL LNG_DLY            ;delay 60ms.
+051A  CD 0E 04                            CALL TAP_STP            ;stop tape
+051D  C3 80 03                            JMP  TAP_RUN            ;run forward 
+                        ;
+                        ;set current block position for drive
+0520  2A 9B 20          SET_POS:          LHLD ID_HDR1            ;get tape position 
+0523  EB                                  XCHG                    ; 
+0524  21 A3 20                            LXI  H, DR0_POS         ;point to drv 0 pos 
+0527  3A 0B 20                            LDA  PK_UNIT            ; 
+052A  3D                                  DCR  A                  ; 
+052B  FA 31 05                            JM   SET_PO1            ; 
+052E  21 A5 20                            LXI  H, DR1_POS         ;point to drv 1 pos 
+
+0531  73                SET_PO1:          MOV  M, E               ;save position 
+0532  23                                  INX  H                  ; 
+0533  72                                  MOV  M, D               ; 
+0534  C9                                  RET                     ; 
+                        ;
+                        ;calculate chksum for data in buffer
+0535  2A A7 20          CALC_CK:          LHLD TRG_BLL            ; 
+0538  22 9F 20                            SHLD CHKLO              ; 
+
+053B  11 19 20          CCK_01:           LXI  D, BUFFER          ;point to data 
+
+053E  0E 80             CCK_02:           MVI  C, 80h             ;count  
+0540  06 01                               MVI  B, 01h             ;preset B for add_chk
+
+0542  1A                CCK_03:           LDAX D                  ;get byte 
+0543  CD 13 02                            CALL ADD_CHK            ;add to chksum 
+0546  13                                  INX  D                  ;point next 
+0547  0D                                  DCR  C                  ;dec count 
+0548  C8                                  RZ                      ;exit if done 
+0549  C3 42 05                            JMP  CCK_03             ;loop 
+                        ;
+                        ;send continue character
+054C  3E 10             SND_CONT:         MVI  A, 10h             ; 
+054E  CD 31 02                            CALL OUTCH              ; 
+0551  C9                                  RET                     ; 
+                        ;
+                        ;read tape block
+0552  3E F8             TAP_READ:         MVI  A, 0F8h            ;retry=8 
+0554  32 AF 20                            STA  RTRY_CT            ; 
+
+0557  CD A4 02          TAP_NXT:          CALL SEL_DRV            ; 
+055A  3A AF 20                            LDA  RTRY_CT            ; 
+055D  E6 01                               ANI  01h                ; 
+055F  C2 6A 05                            JNZ  TAP_R01            ; 
+0562  3A 0A 20                            LDA  PK_MOD             ; 
+0565  E6 01                               ANI  01h                ;reduce gain? 
+0567  CA 72 05                            JZ   TAP_R02            ; 
+
+056A  3A AE 20          TAP_R01:          LDA  PB_IMG             ;get B bits 
+056D  E6 DF                               ANI  0DFh               ;gain reduce=0 
+056F  32 AE 20                            STA  PB_IMG             ;put back 
+
+0572  CD 24 03          TAP_R02:          CALL SEEK               ;seek to block 
+0575  3E A2                               MVI  A, 0A2h            ;delay count 
+0577  CD FB 03                            CALL DELAY              ;delay 950us
+057A  0E 82                               MVI  C, 82h             ;block size 
+057C  21 19 20                            LXI  H, BUFFER          ;buffer pointer
+057F  CD D9 04                            CALL READBLK            ;read block
+0582  CD 35 05                            CALL CALC_CK            ;calc chksum
+                        ;
+                        ;check chksum match
+0585  2A 9F 20          CK_MATCH:         LHLD CHKLO              ;get calculated sum 
+0588  3A 99 20                            LDA  BF_CHKL            ;compare to read sum 
+058B  BD                                  CMP  L                  ; 
+058C  C2 94 05                            JNZ  CK_BAD             ;error? 
+058F  3A 9A 20                            LDA  BF_CHKH            ;same for hi byte 
+0592  BC                                  CMP  H                  ; 
+0593  C8                                  RZ                      ;exit if good
+                        ; 
+                        ;chksum was bad
+0594  2E 02             CK_BAD:           MVI  L, 02h             ;test point 3 
+0596  CD F2 03                            CALL TOG_PC             ;toggle it 
+0599  CD 0E 04                            CALL TAP_STP            ;stop tape 
+059C  2A 9B 20                            LHLD ID_HDR1            ;get block 
+059F  23                                  INX  H                  ;fake next block 
+05A0  CD 20 05                            CALL SET_POS            ;backup  
+05A3  3A 0C 20                            LDA  PK_SWIT            ;maint switch 
+05A6  E6 10                               ANI  10h                ;send bad data 
+05A8  C2 BA 05                            JNZ  SND_BAD            ; 
+05AB  21 AF 20                            LXI  H, RTRY_CT         ; 
+05AE  34                                  INR  M                  ;inc retry count 
+05AF  3E 01                               MVI  A, 01h             ;set retry required
+05B1  32 B4 20                            STA  SUCCES             ;return code 
+05B4  C2 57 05                            JNZ  TAP_NXT            ;out of retries? 
+05B7  C3 C2 05                            JMP  ERR_DCK            ;then data chk error
+                        ; 
+                        ;send bad data to host
+05BA  3E 80             SND_BAD:          MVI  A, 80h             ;count 
+05BC  32 18 20                            STA  BF_CNT             ;set count 
+05BF  CD 64 02                            CALL SND_DATA           ;send data
+                        ;
+                        ;data check error
+05C2  3E EF             ERR_DCK:          MVI  A, 0EFh            ;data check error 
+05C4  C3 75 07                            JMP  SET_SUCC           ; 
+                        ;
+                        ;command: write bock(s) 
+05C7  CD FA 06          OP_WRITE:         CALL SET_BLK            ;setup block num 
+
+05CA  AF                WR_NEXB:          XRA  A                  ;clear go flag 
+05CB  32 A2 20                            STA  FL_GO              ; 
+05CE  CD 4C 05                            CALL SND_CONT           ;send continue 
+05D1  D5                                  PUSH D                  ; 
+                        ;
+05D2  CD 18 03          WR_WAIT:          CALL DRV_RDY            ;cartridge in place? 
+05D5  CD F0 00                            CALL CHK_BOOT           ;boot request? 
+05D8  3A A2 20                            LDA  FL_GO              ; 
+05DB  E6 80                               ANI  80h                ; 
+05DD  CA D2 05                            JZ   WR_WAIT            ;loop till go sets
+                        ;
+05E0  3A 07 20                            LDA  PK_FLAG            ; 
+05E3  FE 01                               CPI  01h                ;did we get a data packet 
+05E5  C2 10 00                            JNZ  RST2               ;no then reset 
+05E8  D1                                  POP  D                  ; 
+                        ;
+                        ;zero fill buffer if not full block
+05E9  CD A4 02          Z_FILL:           CALL SEL_DRV            ; 
+05EC  E5                                  PUSH H                  ; 
+05ED  D5                                  PUSH D                  ; 
+05EE  3A 08 20                            LDA  PK_CMDCT           ;get count 
+05F1  D6 80                               SUI  80h                ;subtract full count 
+05F3  CA 01 06                            JZ   W_SETUP            ;no fill? 
+05F6  4F                                  MOV  C, A               ;save count 
+05F7  21 98 20                            LXI  H, W_BEND          ;point to buf end 
+05FA  AF                                  XRA  A                  ;zero byte 
+
+05FB  77                Z_FIL1:           MOV  M, A               ;put in buffer 
+05FC  2B                                  DCX  H                  ;dec pointer 
+05FD  0C                                  INR  C                  ;inc count 
+05FE  C2 FB 05                            JNZ  Z_FIL1             ;loop 
+                        ;
+                        ;setup gap, sync and chksum
+0601  CD 35 05          W_SETUP:          CALL CALC_CK            ; 
+0604  2A 9F 20                            LHLD CHKLO              ;get checksum 
+0607  22 99 20                            SHLD BF_CHKL            ;save in buffer
+                        ;
+                        ;write requires 47 zero bits followed
+                        ;by a single 1 bit before the data 
+060A  21 00 00                            LXI  H, 0000h           ;zero gap 
+060D  22 13 20                            SHLD W_GAP1             ; 
+0610  22 15 20                            SHLD W_GAP2             ; 
+0613  21 00 80                            LXI  H, 8000h           ;single 1 bit
+0616  22 17 20                            SHLD W_SYNC             ;set start of record
+                        ;
+0619  3A AE 20                            LDA  PB_IMG             ;get port b bits
+061C  D3 22                               OUT  PortB              ;set port 
+061E  DB 21                               IN   PortA              ;read port a 
+0620  E6 01                               ANI  01h                ;write permit 
+0622  3E F5                               MVI  A, 0F5h            ;write protect 
+0624  C2 75 07                            JNZ  SET_SUCC           ;error exit 
+0627  D1                                  POP  D                  ; 
+0628  E1                                  POP  H                  ; 
+0629  CD 24 03                            CALL SEEK               ;find block
+062C  F3                                  DI                      ;
+                        ;
+                        ;delay till write splice in gap 
+062D  3E 0F                               MVI  A, 0Fh             ;delay count
+062F  CD FB 03                            CALL DELAY              ;delay 200us.
+0632  21 13 20                            LXI  H, W_GAP1          ;point to write buf 
+0635  06 86                               MVI  B, 86h             ;byte count 
+0637  16 8A                               MVI  D, 8Ah             ;byte count+trailer 
+                        ;
+                        ;turn on write
+0639  3A AE 20                            LDA  PB_IMG             ;get port B bits 
+063C  F6 02                               ORI  02h                ;turn on write 
+063E  5F                                  MOV  E, A               ; 
+063F  E6 BF                               ANI  0BFh               ;erase enable 
+0641  D3 22                               OUT  PortB              ;set port 
+0643  0E 08                               MVI  C, 08h             ;bit count 
+                        ;write loop
+0645  3E FF             WR_LOOP:          MVI  A, 0FFh            ;set SOD hi 
+0647  30                                  SIM                     ; 
+0648  7E                                  MOV  A, M               ;get byte 
+0649  0F                                  RRC                     ;shift data to next bit 
+064A  77                                  MOV  M, A               ;save shifted byte 
+064B  F6 7F                               ORI  7Fh                ;set SOD lo if data=0
+064D  30                                  SIM                     ; 
+064E  0D                                  DCR  C                  ;dec bit count 
+064F  CA 62 06                            JZ   WR_LO02            ; 
+0652  05                                  DCR  B                  ;dec byte count 
+0653  C2 71 06                            JNZ  WR_LO03            ; 
+0656  7B                                  MOV  A, E               ; 
+0657  D3 22                               OUT  PortB              ; 
+0659  00                                  NOP                     ; 
+                        ;
+                        ;byte count=0 so write trailer
+065A  3E 7F             WR_LO01:          MVI  A, 7Fh             ;set SOD lo 
+065C  30                                  SIM                     ; 
+065D  00                                  NOP                     ; 
+065E  00                                  NOP                     ; 
+065F  C3 45 06                            JMP  WR_LOOP            ; 
+                        ;next byte
+0662  15                WR_LO02:          DCR  D                  ;dec trailer count 
+0663  CA 75 06                            JZ   WR_DONE            ;exit if done 
+0666  23                                  INX  H                  ;point to next byte 
+0667  3E 7F                               MVI  A, 7Fh             ;SOD lo 
+0669  0E 08                               MVI  C, 08h             ;set bit count 
+066B  30                                  SIM                     ; 
+066C  05                                  DCR  B                  ;dec byte count 
+066D  00                                  NOP                     ; 
+066E  C3 45 06                            JMP  WR_LOOP            ; 
+                        ;
+0671  04                WR_LO03:          INR  B                  ; 
+0672  C3 5A 06                            JMP  WR_LO01            ; 
+                        ;write done
+0675  3A AE 20          WR_DONE:          LDA  PB_IMG             ;get port b bits 
+0678  D3 22                               OUT  PortB              ;turn off write 
+067A  3E 0D                               MVI  A, 0Dh             ;mask 5,7
+067C  30                                  SIM                     ; 
+067D  FB                                  EI                      ;enable irq 
+067E  CD 0E 04                            CALL TAP_STP            ;stop tape
+
+0681  3E FF                               MVI  A, 0FFh            ;disable retry 
+0683  32 AF 20                            STA  RTRY_CT            ; 
+0686  CD 85 05                            CALL CK_MATCH           ; 
+0689  2A 07 20                            LHLD PK_FLAG            ; 
+068C  22 9F 20                            SHLD CHKLO              ; 
+068F  CD 3B 05                            CALL CCK_01             ;calc check sum 
+0692  2A 05 20                            LHLD CHK_SAV            ;get RSP check 
+0695  22 99 20                            SHLD BF_CHKL            ;put in buffer 
+0698  CD 85 05                            CALL CK_MATCH           ;match? 
+069B  3A 08 20                            LDA  PK_CMDCT           ;get count 
+069E  CD EF 06                            CALL ADD_DON            ;add to bytes done
+06A1  CD DD 06                            CALL REMAIN             ;dec remaining 
+06A4  DA CA 05                            JC   WR_NEXB            ;more to do? 
+                        ;
+                        ;zero fill rest of 512 byte block
+06A7  3A A9 20                            LDA  CUR_BLK            ;get block
+06AA  E6 03                               ANI  03h                ;last tape block? 
+06AC  3A 0A 20                            LDA  PK_MOD             ;get mod flag 
+06AF  CA C6 06                            JZ   WR_VERF            ; 
+06B2  FE 00                               CPI  00h                ; 
+06B4  FA C6 06                            JM   WR_VERF            ;verify set?
+                        ;
+                        ;zero fill and write next tape block 
+06B7  21 00 00                            LXI  H, 0000h           ;zero out count 
+06BA  22 07 20                            SHLD PK_FLAG            ;and flags 
+06BD  22 AB 20                            SHLD BTYCNT             ; 
+06C0  22 05 20                            SHLD CHK_SAV            ; 
+06C3  C3 E9 05                            JMP  Z_FILL             ;and write it 
+                        ;
+                        ;write verify if flag set
+06C6  E6 01             WR_VERF:          ANI  01h                ;read after write
+06C8  CA D7 06                            JZ   WR_VER2            ;skip?
+06CB  CD FA 06                            CALL SET_BLK            ;reset block number
+
+06CE  CD 52 05          WR_VER1:          CALL TAP_READ           ;read verify 
+06D1  CD DD 06                            CALL REMAIN             ;update bytes remaining 
+06D4  DA CE 06                            JC   WR_VER1            ;more to go? 
+
+06D7  CD 0E 04          WR_VER2:          CALL TAP_STP            ;stop tape 
+06DA  C3 46 07                            JMP  OP_NOOP            ;send response 
+                        ;
+                        ; inc block and calc bytes remaining
+06DD  2A A9 20          REMAIN:           LHLD CUR_BLK            ;inc cur tape block 
+06E0  23                                  INX  H                  ; 
+06E1  22 A9 20                            SHLD CUR_BLK            ; 
+06E4  2A AB 20                            LHLD BTYCNT             ;get byte count 
+06E7  11 80 FF                            LXI  D, 0FF80h          ;subtract block size 
+06EA  19                                  DAD  D                  ; 
+06EB  22 AB 20                            SHLD BTYCNT             ;save bytes remaining 
+06EE  C9                                  RET                     ; 
+                        ;
+                        ;add current transfer to total 
+06EF  21 03 20          ADD_DON:          LXI  H, BYT_DON         ; 
+06F2  86                                  ADD  M                  ; 
+06F3  77                                  MOV  M, A               ; 
+06F4  23                                  INX  H                  ; 
+06F5  7E                                  MOV  A, M               ; 
+06F6  CE 00                               ACI  00h                ; 
+06F8  77                                  MOV  M, A               ; 
+06F9  C9                                  RET                     ; 
+                        ;
+                        ;setup count,block and modifyer
+06FA  2A 0F 20          SET_BLK:          LHLD PK_CNTL            ;get count 
+06FD  2B                                  DCX  H                  ;correct count  
+06FE  22 AB 20                            SHLD BTYCNT             ;save count 
+0701  2A 11 20                            LHLD PK_BLKL            ;get block num
+0704  3A 0A 20                            LDA  PK_MOD             ;get modifyer 
+0707  FE 00                               CPI  00h                ;special address 
+0709  FA 11 07                            JM   SET_BL1            ;mode?
+                        ;
+                        ;not special address mode so
+                        ;convert block number to 0-2047 
+070C  5D                                  MOV  E, L               ; 
+070D  54                                  MOV  D, H               ; 
+070E  19                                  DAD  D                  ; 
+070F  19                                  DAD  D                  ; 
+0710  19                                  DAD  D                  ; 
+
+0711  3E F8             SET_BL1:          MVI  A, 0F8h            ;range check 
+0713  A4                                  ANA  H                  ; 
+0714  3E C9                               MVI  A, 0C9h            ;bad block number 
+0716  C2 75 07                            JNZ  SET_SUCC           ;error exit 
+0719  22 A9 20                            SHLD CUR_BLK            ;set block number 
+071C  C9                                  RET                     ; 
+                        ;
+                        ;command: read block (s)
+071D  CD FA 06          OP_READ:          CALL SET_BLK            ;setup starting block 
+
+0720  CD 52 05          OP_RD1:           CALL TAP_READ           ;read block 
+0723  CD DD 06                            CALL REMAIN             ;calc bytes remaining 
+0726  D2 37 07                            JNC  OP_RD2             ;jmp if not 128 bytes
+                        ;
+                        ;128 byte transfer
+0729  3E 80                               MVI  A, 80h             ;count 
+072B  32 18 20                            STA  BF_CNT             ;set count 
+072E  CD EF 06                            CALL ADD_DON            ; 
+0731  CD 64 02                            CALL SND_DATA           ;send to host 
+0734  C3 20 07                            JMP  OP_RD1             ;loop
+                        ; 
+                        ;less than 128 bytes left
+0737  CD 0E 04          OP_RD2:           CALL TAP_STP            ;stop tape 
+073A  7D                                  MOV  A, L               ; 
+073B  C6 81                               ADI  81h                ; 
+073D  32 18 20                            STA  BF_CNT             ;set count 
+0740  CD EF 06                            CALL ADD_DON            ; 
+0743  CD 64 02                            CALL SND_DATA           ;send to host
+                        ;fall through to send response packet 
+                        ;
+                        ;command: no operation
+                        ;format and return response packet
+0746  21 02 0A          OP_NOOP:          LXI  H, 0A02h           ;flag+count 
+0749  22 07 20                            SHLD PK_FLAG            ; 
+074C  3E 40                               MVI  A, 40h             ;end packet 
+074E  32 09 20                            STA  PK_OPCD            ; 
+0751  3A B4 20                            LDA  SUCCES             ; 
+0754  32 0A 20                            STA  PK_SUCC            ;success code
+0757  AF                                  XRA  A                  ; 
+0758  32 11 20                            STA  PK_SUMSL           ;summary status 
+075B  3A B5 20                            LDA  SUMST              ; 
+075E  32 12 20                            STA  PK_SUMSH           ;summary status 
+0761  2A 03 20                            LHLD BYT_DON            ; 
+0764  22 0F 20                            SHLD PK_CNTL            ;actual count 
+0767  06 05                               MVI  B, 05h             ;delay count 
+0769  CD 04 04                            CALL LNG_DLY            ;delay 8ms.
+076C  21 08 20                            LXI  H, PK_CMDCT        ;point to packet 
+076F  CD 6A 02                            CALL SND_RESP           ;send it 
+0772  C3 91 00                            JMP  IDLE_LOOP          ; 
+                        ;
+                        ;set error in summary status and success code
+                        ;fall through to init and return packet (OP_NOOP)
+0775  32 B4 20          SET_SUCC:         STA  SUCCES             ; 
+0778  3E 80                               MVI  A, 80h             ;error bit
+077A  32 B5 20                            STA  SUMST              ;
+077D  31 FF 20                            LXI  SP, STACK          ;reset stack 
+                        ;
+                        ;command: initialize
+0780  CD 4D 00          OP_INIT:          CALL CLR_STATE          ;reset protocol 
+0783  C3 46 07                            JMP  OP_NOOP            ;send response 
+                        ;
+                        ;command: get status
+                        ;doc says this is a noop, it's not
+0786  3A 0A 20          OP_GETST:         LDA  PK_MOD             ;get modify flag 
+0789  E6 80                               ANI  80h                ;bit 8 set? 
+078B  CA 46 07                            JZ   OP_NOOP            ;send response if not 
+078E  3A AD 20                            LDA  CASS_IN            ;get cassette status 
+0791  E6 0C                               ANI  0Ch                ; 
+0793  0F                                  RRC                     ; 
+0794  32 B5 20                            STA  SUMST              ;set status 
+0797  C3 46 07                            JMP  OP_NOOP            ;send response 
+                        ;
+                        ;Self test
+079A  3E 01             SLF_TEST:         MVI  A, 01h             ;set boot 
+079C  D3 23                               OUT  PortC              ; 
+079E  AF                                  XRA  A                  ;clear result code 
+079F  32 B4 20                            STA  SUCCES             ; 
+07A2  06 C8                               MVI  B, 0C8h            ;delay count
+07A4  CD 04 04                            CALL LNG_DLY            ;delay 300ms. 
+                        ;
+                        ;Test ROM
+07A7  21 00 00                            LXI  H, 0000h           ;point to ROM 
+07AA  22 9F 20                            SHLD CHKLO              ; 
+07AD  EB                                  XCHG                    ; 
+
+07AE  CD 3E 05          TST_01:           CALL CCK_02             ;calc sum for 256 bytes
+07B1  3E 08                               MVI  A, 08h             ;number of blocks 
+07B3  BA                                  CMP  D                  ; 
+07B4  C2 AE 07                            JNZ  TST_01             ;loop if not done 
+07B7  2A 9F 20                            LHLD CHKLO              ;get checksum 
+07BA  2C                                  INR  L                  ;inc 
+07BB  C2 E5 07                            JNZ  TST_04             ;not zero=error 
+07BE  24                                  INR  H                  ;inc 
+07BF  C2 E5 07                            JNZ  TST_04             ;not zero=error 
+                        ;
+                        ;Test RAM
+07C2  21 10 20                            LXI  H, PK_CNTH         ;point to ram 
+07C5  75                TST_02:           MOV  M, L               ;write to RAM 
+07C6  2C                                  INR  L                  ;next 
+07C7  3E F0                               MVI  A, 0F0h            ;end count 
+07C9  BD                                  CMP  L                  ;at end? 
+07CA  C2 C5 07                            JNZ  TST_02             ;loop if not 
+
+07CD  2D                TST_03:           DCR  L                  ;point to previous 
+07CE  7E                                  MOV  A, M               ;get RAM 
+07CF  BD                                  CMP  L                  ;pattern match? 
+07D0  C2 E5 07                            JNZ  TST_04             ;RAM error 
+07D3  FE 10                               CPI  10h                ;end of test? 
+07D5  C2 CD 07                            JNZ  TST_03             ;loop if not
+                        ;
+                        ;Reset IO 
+07D8  CD 57 00                            CALL SETRG1             ; 
+07DB  3E 05                               MVI  A, 05h             ; 
+07DD  D3 23                               OUT  PortC              ; 
+07DF  AF                                  XRA  A                  ; 
+07E0  67                                  MOV  H, A               ; 
+07E1  6F                                  MOV  L, A               ; 
+07E2  C3 E8 07                            JMP  TST_05             ; 
+
+07E5  21 FF 80          TST_04:           LXI  H, 80FFh           ;failed self test 
+
+07E8  22 B4 20          TST_05:           SHLD SUCCES             ;set result 
+07EB  C9                                  RET                     ; 
+                        ;
+                        ;command: diagnostics
+07EC  CD 9A 07          OP_DIAG:          CALL SLF_TEST           ; 
+07EF  C3 46 07                            JMP  OP_NOOP            ;send response 
+                        ;
+                        ;ROM check sum
+                        ;the following bytes should be calculated
+                        ;so the sum of all the ROM bytes is $FFFF
+07F2  CD                                  DB   0CDh               ;
+07F3  79                                  DB   79h                ;
+
+07F4  00                                  DB   00h                ;
+07F5  00                                  DB   00h                ;
+07F6  00                                  DB   00h                ;
+07F7  00                                  DB   00h                ;
+07F8  00                                  DB   00h                ;
+07F9  00                                  DB   00h                ;
+07FA  00                                  DB   00h                ;
+07FB  00                                  DB   00h                ;
+07FC  00                                  DB   00h                ;
+07FD  00                                  DB   00h                ;
+07FE  00                                  DB   00h                ;
+07FF  00                                  DB   00h                ;
+
+                                          END
+

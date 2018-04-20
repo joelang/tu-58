@@ -1,0 +1,26 @@
+module SHIFTR flag '-f'
+
+title '8 bit shift register with output enable
+JOSEPH LANG 4 jul 2016'
+
+	spiu1	device 'P16V8R';
+
+CLK,OE PIN 1,11;
+MOSI  PIN 2;
+Q0,Q1,Q2,Q3 PIN 19,18,17,16;
+Q4,Q5,Q6,Q7 PIN 15,14,13,12;
+    
+Ck,X,Z,P	= .C. , .X., .Z., .P.;
+
+EQUATIONS
+
+Q0 := MOSI;
+Q1 := Q0;
+Q2 := Q1;
+Q3 := Q2;
+Q4 := Q3;
+Q5 := Q4;
+Q6 := Q5;
+Q7 := Q6;
+
+END;
