@@ -40,3 +40,7 @@ shifter.abl --- ABEL source for GAL16V8
 tu-58.pdf --- schematic
 
 I have done a PCB layout and had prototypes run (OSHPARK)
+
+WARNING:
+Not all vendors agree on which pin is "1" on P7.
+Ignore the silk screen and verify +5 goes to the square pad!
